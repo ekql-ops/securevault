@@ -1,5 +1,9 @@
 # 🔐 SecureVault — CLI Password Manager
 
+[![tests](https://github.com/ekql-ops/securevault/actions/workflows/tests.yml/badge.svg)](https://github.com/ekql-ops/securevault/actions/workflows/tests.yml)
+![coverage](https://img.shields.io/badge/coverage-74%25-green)
+![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
+
 A command-line password manager built in Python that stores all credentials with **AES-256 encryption**. Your passwords are never written to disk in plaintext.
 
 ---
@@ -33,7 +37,7 @@ A command-line password manager built in Python that stores all credentials with
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/AbubakarAli8/securevault.git
+git clone https://github.com/ekql-ops/securevault.git
 cd securevault
 ```
 
@@ -116,7 +120,53 @@ cryptography>=41.0.0
 
 ---
 
+## Tests
+
+64 tests covering key derivation, encryption, the vault lifecycle, entry
+CRUD, the password generator and the interactive CLI. Every test that touches
+the filesystem uses `tmp_path`, so the suite never reads or writes the real
+`~/.securevault` directory.
+
+```bash
+pip install pytest pytest-cov
+pytest                                      # run everything
+pytest --cov=vault --cov-report=term-missing   # with coverage
+```
+
+Current coverage is 74%. The uncovered portion is the interactive prompt
+loop in `initialise()` and `main()`, which are not worth mocking.
+
+**The test that matters most** is `test_master_password_is_never_stored` — it
+asserts the master password appears nowhere in either file on disk. If a
+refactor ever broke that, everything else about this project would be
+pointless.
+
+### What writing the tests changed
+
+The `Vault` class originally read its paths from module-level globals, which
+meant there was no way to exercise it without touching the real vault in your
+home directory. It now takes an optional `vault_dir`, defaulting to the same
+place as before. Two methods were also split so the logic is separable from
+the prompts: `create()` and `unlock_with()` do the work, while `initialise()`
+and `unlock()` handle the interactive input around them.
+
+That is a fair illustration of why tests are worth writing even on a small
+project — they surface designs that only work in one context.
+
+## Continuous integration
+
+`.github/workflows/tests.yml` runs on every push and pull request:
+
+- Tests across Python 3.10, 3.11 and 3.12
+- Lint with `ruff`
+- Coverage report uploaded as a build artifact
+
+Rules are pinned in `ruff.toml` rather than relying on defaults, so a future
+ruff release adding new rules cannot turn the build red without a code change.
+
+---
+
 ## Author
 
 **Abubakar Albakri** — BSc Computer Science, Manchester Metropolitan University  
-[GitHub](https://github.com/AbubakarAli8)
+[GitHub](https://github.com/ekql-ops)

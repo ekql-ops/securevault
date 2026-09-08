@@ -1,0 +1,13 @@
+# Pinning the rule set explicitly, so a future ruff release adding new
+# default rules cannot turn CI red without a code change on our side.
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "PL", "DTZ", "BLE"]
+ignore = [
+    "E501",     # long lines: the ASCII box-drawing in CLI output runs long by design
+    "PLR2004",  # magic values are fine in tests
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]

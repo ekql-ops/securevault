@@ -9,24 +9,25 @@ using AES-256 encryption via the Fernet symmetric encryption scheme.
 Passwords are never stored in plaintext.
 """
 
-import os
-import json
+import getpass
 import hashlib
+import json
 import secrets
 import string
-import getpass
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
 
 try:
-    from cryptography.fernet import Fernet
+    import base64
+
+    from cryptography.fernet import Fernet, InvalidToken
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    import base64
 except ImportError:
     print("[ERROR] Missing dependency: cryptography")
     print("  Run: pip install cryptography")
-    exit(1)
+    sys.exit(1)
 
 
 # ─── Constants ────────────────────────────────────────────────
@@ -74,14 +75,23 @@ def decrypt_data(encrypted: bytes, key: bytes) -> dict:
 # ─── Vault Management ─────────────────────────────────────────
 
 class Vault:
-    def __init__(self):
-        self.vault_dir = VAULT_FILE.parent
+    def __init__(self, vault_dir: Path | None = None):
+        """
+        vault_dir defaults to ~/.securevault. It is injectable so that tests
+        can point at a temporary directory instead of the real home folder —
+        writing tests is what surfaced this; the paths used to be module-level
+        globals and there was no way to exercise the class without touching
+        the user's actual vault.
+        """
+        self.vault_dir  = Path(vault_dir) if vault_dir else VAULT_FILE.parent
+        self.vault_file  = self.vault_dir / "vault.enc"
+        self.config_file = self.vault_dir / "config.json"
         self.vault_dir.mkdir(parents=True, exist_ok=True)
         self.key = None
         self.data = {}
 
     def is_initialised(self) -> bool:
-        return VAULT_FILE.exists() and CONFIG_FILE.exists()
+        return self.vault_file.exists() and self.config_file.exists()
 
     def initialise(self):
         """First-time setup: create master password and encrypt an empty vault."""
@@ -101,44 +111,51 @@ class Vault:
                 continue
             break
 
+        self.create(pw)
+        print("\n  [✓] Vault created successfully.\n")
+
+    def create(self, master_password: str):
+        """Create a new vault with the given master password. No I/O prompts,
+        so this is callable from tests and from initialise() alike."""
         salt = secrets.token_bytes(SALT_SIZE)
-        master_hash = hash_master(pw, salt)
-        self.key = derive_key(pw, salt)
+        self.key = derive_key(master_password, salt)
 
         config = {
             "salt": salt.hex(),
-            "master_hash": master_hash,
-            "created_at": datetime.now().isoformat(),
+            "master_hash": hash_master(master_password, salt),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        self.config_file.write_text(json.dumps(config, indent=2))
         self.data = {"entries": {}}
         self._save()
-        print("\n  [✓] Vault created successfully.\n")
 
     def unlock(self) -> bool:
         """Prompt for master password and unlock the vault."""
-        config = json.loads(CONFIG_FILE.read_text())
+        pw = getpass.getpass("  Master password: ")
+        if not self.unlock_with(pw):
+            print("\n  [✗] Incorrect master password, or the vault is corrupted.\n")
+            return False
+        return True
+
+    def unlock_with(self, master_password: str) -> bool:
+        """Verify a master password and decrypt the vault. Returns False on a
+        wrong password or unreadable data. No prompts, so tests can call it."""
+        config = json.loads(self.config_file.read_text())
         salt = bytes.fromhex(config["salt"])
 
-        pw = getpass.getpass("  Master password: ")
-        candidate_hash = hash_master(pw, salt)
-
-        if candidate_hash != config["master_hash"]:
-            print("\n  [✗] Incorrect master password.\n")
+        if hash_master(master_password, salt) != config["master_hash"]:
             return False
 
-        self.key = derive_key(pw, salt)
+        self.key = derive_key(master_password, salt)
         try:
-            self.data = decrypt_data(VAULT_FILE.read_bytes(), self.key)
-        except Exception:
-            print("\n  [✗] Failed to decrypt vault. Data may be corrupted.\n")
+            self.data = decrypt_data(self.vault_file.read_bytes(), self.key)
+        except (InvalidToken, json.JSONDecodeError, ValueError, OSError):
             return False
-
         return True
 
     def _save(self):
         """Encrypt and write vault to disk."""
-        VAULT_FILE.write_bytes(encrypt_data(self.data, self.key))
+        self.vault_file.write_bytes(encrypt_data(self.data, self.key))
 
     # ─── CRUD Operations ──────────────────────────────────────
 
@@ -149,8 +166,8 @@ class Vault:
             "password": password,
             "url": url,
             "notes": notes,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save()
 
@@ -198,16 +215,20 @@ def generate_password(length: int = 20, use_symbols: bool = True) -> str:
 
 def password_strength(password: str) -> tuple[str, str]:
     """Return a strength label and colour hint for a password."""
-    score = 0
-    if len(password) >= 12:  score += 1
-    if len(password) >= 20:  score += 1
-    if any(c.isupper() for c in password): score += 1
-    if any(c.islower() for c in password): score += 1
-    if any(c.isdigit() for c in password): score += 1
-    if any(c in string.punctuation for c in password): score += 1
+    checks = (
+        len(password) >= 12,
+        len(password) >= 20,
+        any(c.isupper() for c in password),
+        any(c.islower() for c in password),
+        any(c.isdigit() for c in password),
+        any(c in string.punctuation for c in password),
+    )
+    score = sum(checks)
 
-    if score <= 2:   return "Weak",   "⚠"
-    if score <= 4:   return "Medium", "~"
+    if score <= 2:
+        return "Weak", "⚠"
+    if score <= 4:
+        return "Medium", "~"
     return "Strong", "✓"
 
 
@@ -363,7 +384,7 @@ def main():
     else:
         print("\n  Unlocking vault...")
         if not vault.unlock():
-            exit(1)
+            sys.exit(1)
         print("  [✓] Vault unlocked.\n")
 
     while True:
